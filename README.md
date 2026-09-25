@@ -9,6 +9,9 @@ Only one model may run in each pool. Switching waits for active requests,
 stops the previous container, starts and health-checks the selected container,
 runs an optional warm-up, and rolls back if activation fails or is cancelled.
 The service is not specific to Qwen, SGLang, or a particular GPU topology.
+Concurrent requests for the same model reuse one activation operation; a
+request for a different model receives a conflict until the current switch is
+finished.
 
 The service requires access to the Docker socket and must not be exposed without
 its bearer token. The API cannot execute arbitrary container names or commands;

@@ -200,6 +200,46 @@ class ModelManagerTests(unittest.IsolatedAsyncioTestCase):
         snapshot = await manager.snapshot()
         self.assertEqual(snapshot["pools"][0]["operation"]["id"], operation.id)
 
+        repeated = await manager.activate("stock")
+        self.assertEqual(repeated.id, operation.id)
+
+    async def test_concurrent_activation_reuses_operation(self):
+        runtime = FakeRuntime(
+            {
+                "stock-container": ContainerState(status="running", running=True),
+                "alt-container": ContainerState(status="created", running=False),
+            },
+            ready={"stock-container"},
+        )
+        manager = ModelManager(config(), runtime)
+
+        first, second = await asyncio.gather(
+            manager.activate("alternate"),
+            manager.activate("alternate"),
+        )
+        await wait_terminal(manager, first)
+
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(
+            [action for action in runtime.actions if action == ("start", "alt-container")],
+            [("start", "alt-container")],
+        )
+
+    async def test_conflicting_activation_is_rejected(self):
+        runtime = FakeRuntime(
+            {
+                "stock-container": ContainerState(status="running", running=True),
+                "alt-container": ContainerState(status="created", running=False),
+            },
+            ready={"stock-container"},
+        )
+        manager = ModelManager(config(), runtime)
+
+        operation = await manager.activate("alternate")
+        with self.assertRaisesRegex(RuntimeError, "activation in progress"):
+            await manager.activate("stock")
+        await wait_terminal(manager, operation)
+
     async def test_cancellation_during_warmup_rolls_back(self):
         warmup_started = asyncio.Event()
         warmup_release = asyncio.Event()

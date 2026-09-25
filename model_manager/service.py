@@ -58,6 +58,7 @@ class ModelManager:
         self.runtime = runtime
         self._operations: dict[str, Operation] = {}
         self._pool_operations: dict[str, str] = {}
+        self._pool_locks = {pool.id: asyncio.Lock() for pool in config.pools}
         self._tasks: set[asyncio.Task[None]] = set()
         self._pool_by_id = {pool.id: pool for pool in config.pools}
         self._model_index = {
@@ -164,34 +165,42 @@ class ModelManager:
         if target is None:
             raise KeyError(model_id)
         pool, model = target
-        active_operation = self._active_operation(pool.id)
-        if active_operation is not None:
-            if active_operation.model_id == model_id:
-                return active_operation
-            raise RuntimeError(f"pool {pool.id} already has an activation in progress")
+        async with self._pool_locks[pool.id]:
+            active_operation = self._active_operation(pool.id)
+            if active_operation is not None:
+                if active_operation.model_id == model_id:
+                    return active_operation
+                raise RuntimeError(f"pool {pool.id} already has an activation in progress")
 
-        state = await self.runtime.inspect(model.container)
-        if state.running and await self.runtime.is_ready(pool, model):
-            operation = Operation(
-                id=str(uuid.uuid4()),
-                pool_id=pool.id,
-                model_id=model.id,
-                state="ready",
-                phase="ready",
-                message="Model is already ready",
-                progress=100,
-            )
+            state = await self.runtime.inspect(model.container)
+            if state.running and await self.runtime.is_ready(pool, model):
+                latest_operation = self._latest_operation(pool.id)
+                if (
+                    latest_operation is not None
+                    and latest_operation.model_id == model_id
+                    and latest_operation.state == "ready"
+                ):
+                    return latest_operation
+                operation = Operation(
+                    id=str(uuid.uuid4()),
+                    pool_id=pool.id,
+                    model_id=model.id,
+                    state="ready",
+                    phase="ready",
+                    message="Model is already ready",
+                    progress=100,
+                )
+                self._store_operation(operation)
+                self._pool_operations[pool.id] = operation.id
+                return operation
+
+            operation = Operation(id=str(uuid.uuid4()), pool_id=pool.id, model_id=model.id)
             self._store_operation(operation)
             self._pool_operations[pool.id] = operation.id
+            task = asyncio.create_task(self._run_activation(pool, model, operation))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
             return operation
-
-        operation = Operation(id=str(uuid.uuid4()), pool_id=pool.id, model_id=model.id)
-        self._store_operation(operation)
-        self._pool_operations[pool.id] = operation.id
-        task = asyncio.create_task(self._run_activation(pool, model, operation))
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-        return operation
 
     def _store_operation(self, operation: Operation) -> None:
         self._operations[operation.id] = operation
